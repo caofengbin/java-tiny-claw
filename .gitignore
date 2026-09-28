@@ -1,24 +1,54 @@
-# Compiled class file
+# Maven 构建产物（mvn compile / package / test）
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# 编译产物
 *.class
 
-# Log file
-*.log
-
-# BlueJ files
-*.ctxt
-
-# Mobile Tools for Java (J2ME)
-.mtj.tmp/
-
-# Package Files #
+# 打包产物。Maven Wrapper 的 jar 是构建工具，不在此列
 *.jar
 *.war
 *.nar
 *.ear
-*.zip
-*.tar.gz
-*.rar
+!.mvn/wrapper/maven-wrapper.jar
 
-# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+# 日志与 JVM 崩溃转储
+*.log
 hs_err_pid*
 replay_pid*
+
+# 本地密钥（后续接入真实 LLM 时使用，当前 MockProvider 不读取）
+.env
+.env.*
+!.env.example
+
+# IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# Eclipse
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache/
+bin/
+
+# VS Code / Cursor 本地配置
+.vscode/
+.cursor/
+
+# macOS
+.DS_Store
