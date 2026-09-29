@@ -2,81 +2,57 @@ package github.javatinyclaw.cmd.claw;
 
 import github.javatinyclaw.context.Context;
 import github.javatinyclaw.internal.engine.AgentEngine;
+import github.javatinyclaw.internal.provider.ClaudeProvider;
 import github.javatinyclaw.internal.provider.LLMProvider;
-import github.javatinyclaw.internal.schema.Message;
-import github.javatinyclaw.internal.schema.Role;
+import github.javatinyclaw.internal.provider.OpenAIProvider;
 import github.javatinyclaw.internal.schema.ToolCall;
 import github.javatinyclaw.internal.schema.ToolDefinition;
 import github.javatinyclaw.internal.schema.ToolResult;
 import github.javatinyclaw.internal.tools.Registry;
 
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class Main {
 
     // ==========================================
-    // 1. 伪造的大模型 Provider
-    // ==========================================
-    static class MockProvider implements LLMProvider {
-        int turn;
-
-        // 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果
-        @Override
-        public Message generate(Context ctx, List<Message> msgs, List<ToolDefinition> tools) {
-            // 如果工具列表为空，说明这是引擎发起的 Phase 1: Thinking 阶段
-            if (tools == null || tools.isEmpty()) {
-                Message msg = new Message();
-                msg.role = Role.ASSISTANT;
-                msg.content = "【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。";
-                return msg;
-            }
-
-            // 如果工具列表不为空，说明这是 Phase 2: Action 阶段
-            turn++;
-            if (turn == 1) {
-                // 第一轮 Action：顺着刚才的 Thinking，精准调用工具
-                Message msg = new Message();
-                msg.role = Role.ASSISTANT;
-                msg.content = "我要执行我刚才计划的步骤了。";
-                ToolCall call = new ToolCall();
-                call.id = "call_123";
-                call.name = "bash";
-                call.arguments = "{\"command\": \"ls -la\"}".getBytes(StandardCharsets.UTF_8);
-                List<ToolCall> toolCalls = new ArrayList<ToolCall>();
-                toolCalls.add(call);
-                msg.toolCalls = toolCalls;
-                return msg;
-            }
-
-            // 第二轮 Action：直接总结退出
-            Message msg = new Message();
-            msg.role = Role.ASSISTANT;
-            msg.content = "根据工具返回的结果，我看到了 main.go，任务圆满完成！";
-            return msg;
-        }
-    }
-
-    // ==========================================
-    // 2. 伪造的 Tool Registry
+    // 2. 伪造的工具注册表 (用于测试 Provider 的工具提取能力)
     // ==========================================
     static class MockRegistry implements Registry {
         @Override
         public List<ToolDefinition> getAvailableTools() {
             List<ToolDefinition> tools = new ArrayList<ToolDefinition>();
-            ToolDefinition bash = new ToolDefinition();
-            bash.name = "bash";
-            tools.add(bash);
+            ToolDefinition weather = new ToolDefinition();
+            weather.name = "get_weather";
+            weather.description = "获取指定城市的当前天气情况。";
+
+            Map<String, Object> city = new HashMap<String, Object>();
+            city.put("type", "string");
+
+            Map<String, Object> properties = new HashMap<String, Object>();
+            properties.put("city", city);
+
+            List<String> required = new ArrayList<String>();
+            required.add("city");
+
+            Map<String, Object> inputSchema = new HashMap<String, Object>();
+            inputSchema.put("type", "object");
+            inputSchema.put("properties", properties);
+            inputSchema.put("required", required);
+            weather.inputSchema = inputSchema;
+
+            tools.add(weather);
             return tools;
         }
 
         @Override
         public ToolResult execute(Context ctx, ToolCall call) {
-            // 直接返回一段伪造的终端输出
+            System.err.printf("  -> [Mock 工具执行] 获取 %s 的天气中...%n", call.name);
             ToolResult result = new ToolResult();
             result.toolCallId = call.id;
-            result.output = "-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n";
+            result.output = "API 返回：今天是晴天，气温 25 度。";
             result.isError = false;
             return result;
         }
@@ -86,21 +62,36 @@ public class Main {
     // 3. 组装运行
     // ==========================================
     public static void main(String[] args) {
+        // 确保已设置 ZHIPU_API_KEY
+        String apiKey = System.getenv("ZHIPU_API_KEY");
+        if (apiKey == null || apiKey.equals("")) {
+            System.err.println("请先导出 ZHIPU_API_KEY 环境变量");
+            System.exit(1);
+        }
+
         // 获取当前执行目录作为 WorkDir 物理边界
         String workDir = System.getProperty("user.dir");
         if (workDir == null) {
             workDir = "";
         }
 
-        MockProvider p = new MockProvider();
-        MockRegistry r = new MockRegistry();
+        // 1. 初始化真实的 Provider大脑 (指向智谱 GLM-4.5)
+        // 这里你可以任意切换 NewZhipuClaudeProvider 或 NewZhipuOpenAIProvider，效果完全一致！
+        LLMProvider llmProvider = OpenAIProvider.newZhipuOpenAIProvider("glm-5.3-flash");
+//        LLMProvider llmProvider = ClaudeProvider.newZhipuClaudeProvider("glm-5.3-flash");
 
-        // 实例化引擎，开启 EnableThinking = true
-        AgentEngine eng = new AgentEngine(p, r, workDir, true);
+        // 2. 注入伪造的工具注册表
+        Registry registry = new MockRegistry();
+
+        // 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
+        AgentEngine eng = new AgentEngine(llmProvider, registry, workDir, false);
+
+        // 设定测试任务
+        String prompt = "我想去北京跑步，帮我查查天气适合吗？";
 
         // 发起任务指令
         try {
-            eng.run(Context.background(), "帮我检查当前目录的文件");
+            eng.run(Context.background(), prompt);
         } catch (Exception err) {
             System.err.printf("引擎崩溃: %s%n", err.getMessage());
             System.exit(1);
