@@ -24,12 +24,22 @@ public class Main {
 
         // 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果
         @Override
-        public Message generate(Context ctx, List<Message> msgs, List<ToolDefinition> unused) {
-            turn++;
-            if (turn == 1) {
+        public Message generate(Context ctx, List<Message> msgs, List<ToolDefinition> tools) {
+            // 如果工具列表为空，说明这是引擎发起的 Phase 1: Thinking 阶段
+            if (tools == null || tools.isEmpty()) {
                 Message msg = new Message();
                 msg.role = Role.ASSISTANT;
-                msg.content = "让我来看看当前目录下有什么文件。";
+                msg.content = "【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。";
+                return msg;
+            }
+
+            // 如果工具列表不为空，说明这是 Phase 2: Action 阶段
+            turn++;
+            if (turn == 1) {
+                // 第一轮 Action：顺着刚才的 Thinking，精准调用工具
+                Message msg = new Message();
+                msg.role = Role.ASSISTANT;
+                msg.content = "我要执行我刚才计划的步骤了。";
                 ToolCall call = new ToolCall();
                 call.id = "call_123";
                 call.name = "bash";
@@ -40,9 +50,10 @@ public class Main {
                 return msg;
             }
 
+            // 第二轮 Action：直接总结退出
             Message msg = new Message();
             msg.role = Role.ASSISTANT;
-            msg.content = "我看到了文件列表，里面包含 Main.java，任务完成！";
+            msg.content = "根据工具返回的结果，我看到了 main.go，任务圆满完成！";
             return msg;
         }
     }
@@ -53,7 +64,11 @@ public class Main {
     static class MockRegistry implements Registry {
         @Override
         public List<ToolDefinition> getAvailableTools() {
-            return null;
+            List<ToolDefinition> tools = new ArrayList<ToolDefinition>();
+            ToolDefinition bash = new ToolDefinition();
+            bash.name = "bash";
+            tools.add(bash);
+            return tools;
         }
 
         @Override
@@ -80,8 +95,8 @@ public class Main {
         MockProvider p = new MockProvider();
         MockRegistry r = new MockRegistry();
 
-        // 实例化核心引擎
-        AgentEngine eng = new AgentEngine(p, r, workDir);
+        // 实例化引擎，开启 EnableThinking = true
+        AgentEngine eng = new AgentEngine(p, r, workDir, true);
 
         // 发起任务指令
         try {
