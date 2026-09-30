@@ -6,6 +6,7 @@ import github.javatinyclaw.internal.provider.ClaudeProvider;
 import github.javatinyclaw.internal.provider.LLMProvider;
 import github.javatinyclaw.internal.provider.OpenAIProvider;
 import github.javatinyclaw.internal.tools.BashTool;
+import github.javatinyclaw.internal.tools.EditFileTool;
 import github.javatinyclaw.internal.tools.ReadFileTool;
 import github.javatinyclaw.internal.tools.Registry;
 import github.javatinyclaw.internal.tools.RegistryImpl;
@@ -41,18 +42,21 @@ public class Main {
         registry.register(ReadFileTool.newReadFileTool(workDir));
         registry.register(WriteFileTool.newWriteFileTool(workDir));
         registry.register(BashTool.newBashTool(workDir));
+        // 【新增挂载】
+        registry.register(EditFileTool.newEditFileTool(workDir));
 
         // 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
         AgentEngine eng = new AgentEngine(llmProvider, registry, workDir, false);
 
-        // 设定测试任务
-        // 发起一个需要连贯物理动作的任务
+        // 发起一个需要局部修改的指令
         String prompt =
                 "\n" +
-                "    请帮我执行以下操作：\n" +
-                "    1. 用 bash 查看一下我当前电脑的 Go 版本。\n" +
-                "    2. 帮我写一个简单的 helloworld.go 文件，输出 \"Hello, go-tiny-claw!\"。\n" +
-                "    3. 用 bash 编译并运行这个 go 文件，确认它能正常工作。\n" +
+                "    我当前目录下有一个 server.go 文件。\n" +
+                "    请帮我把里面 \"TODO: 增加鉴权逻辑\" 下面的那个 if 语句，整个替换为：\n" +
+                "    if user == nil {\n" +
+                "        fmt.Println(\"Forbidden!\")\n" +
+                "        return\n" +
+                "    }\n" +
                 "    ";
 
         // 发起任务指令
