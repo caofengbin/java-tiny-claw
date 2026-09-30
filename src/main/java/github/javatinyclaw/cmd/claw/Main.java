@@ -45,18 +45,14 @@ public class Main {
         // 【新增挂载】
         registry.register(EditFileTool.newEditFileTool(workDir));
 
-        // 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
-        AgentEngine eng = new AgentEngine(llmProvider, registry, workDir, false);
+        // 3.实例化引擎，开启 EnableThinking = true (开启慢思考，促使模型一次性统筹规划)
+        AgentEngine eng = new AgentEngine(llmProvider, registry, workDir, true);
 
-        // 发起一个需要局部修改的指令
+        // 4.下发一个需要收集多源信息的任务
         String prompt =
                 "\n" +
-                "    我当前目录下有一个 server.go 文件。\n" +
-                "    请帮我把里面 \"TODO: 增加鉴权逻辑\" 下面的那个 if 语句，整个替换为：\n" +
-                "    if user == nil {\n" +
-                "        fmt.Println(\"Forbidden!\")\n" +
-                "        return\n" +
-                "    }\n" +
+                "    我当前目录下有 a.txt, b.txt, c.txt 三个文件。\n" +
+                "    为了节省时间，请你同时一次性读取这三个文件，并将它们的内容综合起来，告诉我它们分别记录了什么领域的信息。\n" +
                 "    ";
 
         // 发起任务指令

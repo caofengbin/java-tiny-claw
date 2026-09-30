@@ -12,6 +12,7 @@ import github.javatinyclaw.internal.tools.Registry;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 
 // AgentEngine 是微型 OS 的核心驱动
 public class AgentEngine {
@@ -111,32 +112,62 @@ public class AgentEngine {
                 break;
             }
 
-            logPrintf("[Engine] 模型请求调用 %d 个工具...%n", toolCallCount);
+            logPrintf("[Engine] 模型请求并发调用 %d 个工具...%n", toolCallCount);
 
-            for (ToolCall toolCall : actionResp.toolCalls) {
-                String arguments = toolCall.arguments == null ? "" : new String(toolCall.arguments, StandardCharsets.UTF_8);
-                logPrintf("  -> 🛠️ 执行工具: %s, 参数: %s%n", toolCall.name, arguments);
+            // 【核心改造开始】: 从串行 (Sequential) 演进为并行 (Parallel)
 
-                // 通过 Registry 路由并执行底层工具
-                ToolResult result = registry.execute(ctx, toolCall);
+            // 1. 预分配一个固定长度的数组，用于安全地存放各个并发工具的执行结果（Observation）
+            // 长度与 ToolCalls 的数量完全一致
+            Message[] observationMsgs = new Message[toolCallCount];
 
-                if (result.isError) {
-                    logPrintf("  -> ❌ 工具执行报错: %s%n", result.output);
-                } else {
-                    int outputBytes = result.output == null ? 0 : result.output.getBytes(StandardCharsets.UTF_8).length;
-                    logPrintf("  -> ✅ 工具执行成功 (返回 %d 字节)%n", outputBytes);
-                }
+            // 2. 声明 CountDownLatch 用于阻塞等待所有虚拟线程完成，对应 Go 的 sync.WaitGroup
+            CountDownLatch wg = new CountDownLatch(toolCallCount);
 
-                // 将工具执行的观察结果 (Observation) 封装为 User Message 追加到上下文中
-                // 注意：ToolCallID 必须携带！这是维系大模型推理链条的关键
-                Message observationMsg = new Message();
-                observationMsg.role = Role.USER;
-                observationMsg.content = result.output;
-                observationMsg.toolCallId = toolCall.id;
-                contextHistory.add(observationMsg);
+            // 3. 遍历模型请求的所有工具，为每一个工具单独 Fork 出一个虚拟线程
+            for (int i = 0; i < toolCallCount; i++) {
+                // 将索引和 toolCall 拷贝为最终变量，防止闭包捕获循环变量
+                final int idx = i;
+                final ToolCall call = actionResp.toolCalls.get(i);
+
+                Thread.startVirtualThread(() -> {
+                    try {
+                        logPrintf("  -> [Go-%d] 🛠️ 触发并行执行: %s%n", idx, call.name);
+
+                        // 调用底层 Registry 执行工具（物理操作）
+                        ToolResult result = registry.execute(ctx, call);
+
+                        if (result.isError) {
+                            logPrintf("  -> [Go-%d] ❌ 工具执行报错: %s%n", idx, result.output);
+                        } else {
+                            int outputBytes = result.output == null ? 0 : result.output.getBytes(StandardCharsets.UTF_8).length;
+                            logPrintf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)%n", idx, outputBytes);
+                        }
+
+                        // 将执行结果封装为一条用户消息 (Role.USER)
+                        Message obsMsg = new Message();
+                        obsMsg.role = Role.USER;
+                        obsMsg.content = result.output;
+                        obsMsg.toolCallId = call.id;
+
+                        // 【线程安全】: 由于每个虚拟线程操作的是预分配数组的不同索引，
+                        // 这里不需要加锁，性能极高！
+                        observationMsgs[idx] = obsMsg;
+                    } finally {
+                        wg.countDown(); // 虚拟线程结束时计数器减一
+                    }
+                });
             }
 
-            // 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
+            // 4. Join 阻塞等待：主循环挂起，直到所有的并发虚拟线程全部执行完毕
+            wg.await();
+            logPrintln("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...");
+
+            // 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
+            for (Message obs : observationMsgs) {
+                contextHistory.add(obs);
+            }
+
+            // 循环回到开头，模型将带着这一批新的 Observation 继续它的下一轮思考...
         }
     }
 
