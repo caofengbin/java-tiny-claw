@@ -31,7 +31,8 @@ public class AgentEngine {
     }
 
     // Run 启动 Agent 的生命周期
-    public void run(Context ctx, String userPrompt) throws Exception {
+    // Run 方法新增了 Reporter 参数
+    public void run(Context ctx, String userPrompt, Reporter reporter) throws Exception {
         logPrintf("[Engine] 引擎启动，锁定工作区: %s%n", workDir);
         logPrintf("[Engine] 慢思考模式 (Thinking Phase): %s%n", enableThinking);
 
@@ -64,6 +65,10 @@ public class AgentEngine {
             // ====================================================================
             if (enableThinking) {
                 logPrintln("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...");
+                if (reporter != null) {
+                    // 【触发 Reporter】: 开始慢思考
+                    reporter.onThinking(ctx);
+                }
 
                 // 核心机制：传入的 availableTools 为 null！
                 // 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
@@ -99,8 +104,9 @@ public class AgentEngine {
 
             contextHistory.add(actionResp);
 
-            if (actionResp.content != null && !actionResp.content.equals("")) {
-                logPrintf("🤖 [对外回复]: %s%n", actionResp.content);
+            if (actionResp.content != null && !actionResp.content.equals("") && reporter != null) {
+                // 【触发 Reporter】: 输出阶段性总结或最终回复
+                reporter.onMessage(ctx, actionResp.content);
             }
 
             // ====================================================================
@@ -131,16 +137,28 @@ public class AgentEngine {
 
                 Thread.startVirtualThread(() -> {
                     try {
-                        logPrintf("  -> [Go-%d] 🛠️ 触发并行执行: %s%n", idx, call.name);
+                        if (reporter != null) {
+                            // 【触发 Reporter】: 报告即将在底层执行的工具
+                            String args = call.arguments == null ? "" : new String(call.arguments, StandardCharsets.UTF_8);
+                            reporter.onToolCall(ctx, call.name, args);
+                            logPrintf("  -> [Go-%d] 🛠️ 触发并行执行: %s%n", idx, call.name);
+                        }
 
                         // 调用底层 Registry 执行工具（物理操作）
                         ToolResult result = registry.execute(ctx, call);
 
-                        if (result.isError) {
-                            logPrintf("  -> [Go-%d] ❌ 工具执行报错: %s%n", idx, result.output);
-                        } else {
-                            int outputBytes = result.output == null ? 0 : result.output.getBytes(StandardCharsets.UTF_8).length;
-                            logPrintf("  -> [Go-%d] ✅ 工具执行成功 (返回 %d 字节)%n", idx, outputBytes);
+                        if (reporter != null) {
+                            // 为了防止大文件读取导致飞书消息过长被截断，我们仅汇报工具执行状态
+                            // 注意：传递给大模型的 observationMsgs 依然是完整数据，只是人类看到的 Reporter 是缩略版
+                            String displayOutput = result.output;
+                            if (displayOutput != null) {
+                                byte[] outputBytes = displayOutput.getBytes(StandardCharsets.UTF_8);
+                                if (outputBytes.length > 200) {
+                                    displayOutput = new String(outputBytes, 0, 200, StandardCharsets.UTF_8) + "... (已截断)";
+                                }
+                            }
+                            // 【触发 Reporter】: 汇报工具物理执行的结果
+                            reporter.onToolResult(ctx, call.name, displayOutput, result.isError);
                         }
 
                         // 将执行结果封装为一条用户消息 (Role.USER)
