@@ -12,18 +12,19 @@ import github.javatinyclaw.internal.tools.Registry;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 // AgentEngine 是微型 OS 的核心驱动
 public class AgentEngine {
-    private LLMProvider provider;
-    private Registry registry;
+    private final LLMProvider provider;
+    private final Registry registry;
 
     // WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
     public String workDir;
     public boolean enableThinking; // 【新增】慢思考模式开关
-    private PromptComposer composer; // 【新增】引擎持有 Composer 实例
+    private final PromptComposer composer; // 【新增】引擎持有 Composer 实例
 
     public AgentEngine(LLMProvider p, Registry r, String workDir, boolean enableThinking) {
         this.provider = p;
@@ -82,7 +83,7 @@ public class AgentEngine {
                 }
 
                 // 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文中
-                if (thinkResp.content != null && !thinkResp.content.equals("")) {
+                if (thinkResp.content != null && !thinkResp.content.isEmpty()) {
                     // Go 用 fmt.Printf 走 stdout、log 走 stderr。IDE 会先展示整段 stderr 再拼 stdout，
                     // 两条流无法交错，这里改到同一条 stderr，才能看到真实的 Turn 顺序。
                     logPrintf("🧠 [内部思考 Trace]: %s%n", thinkResp.content);
@@ -106,7 +107,7 @@ public class AgentEngine {
 
             contextHistory.add(actionResp);
 
-            if (actionResp.content != null && !actionResp.content.equals("") && reporter != null) {
+            if (actionResp.content != null && !actionResp.content.isEmpty() && reporter != null) {
                 // 【触发 Reporter】: 输出阶段性总结或最终回复
                 reporter.onMessage(ctx, actionResp.content);
             }
@@ -183,9 +184,7 @@ public class AgentEngine {
             logPrintln("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...");
 
             // 5. 聚合装填：将并行的结果，按照原本的顺序，一次性追加到上下文时间线中
-            for (Message obs : observationMsgs) {
-                contextHistory.add(obs);
-            }
+            contextHistory.addAll(Arrays.asList(observationMsgs));
 
             // 循环回到开头，模型将带着这一批新的 Observation 继续它的下一轮思考...
         }

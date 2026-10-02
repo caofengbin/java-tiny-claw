@@ -56,7 +56,7 @@ public class PromptComposer {
 
         // 3. 动态加载技能外挂 (Skills)
         String skillsContent = skillLoader.loadAll();
-        if (!skillsContent.equals("")) {
+        if (!skillsContent.isEmpty()) {
             promptBuilder.append(skillsContent);
         }
 

@@ -17,7 +17,7 @@ public class Main {
     public static void main(String[] args) {
         // 确保已设置 ZHIPU_API_KEY
         String apiKey = System.getenv("ZHIPU_API_KEY");
-        if (apiKey == null || apiKey.equals("")) {
+        if (apiKey == null || apiKey.isEmpty()) {
             System.err.println("请先导出 ZHIPU_API_KEY 环境变量");
             System.exit(1);
         }
@@ -49,10 +49,10 @@ public class Main {
         // 【注入新实现的终端输出器】
         TerminalReporter reporter = TerminalReporter.newTerminalReporter();
 
-        String prompt = "\n"
-                + "    我需要在当前目录下新建一个 ping.go，提供一个简单的 http ping 接口。\n"
-                + "    写完之后，帮我把代码用 git 提交一下。\n"
-                + "    ";
+        String prompt = """
+                    我需要在当前目录下新建一个 ping.go，提供一个简单的 http ping 接口。
+                    写完之后，帮我把代码用 git 提交一下。
+                """;
 
         try {
             eng.run(Context.background(), prompt, reporter);
