@@ -1,6 +1,7 @@
 package github.javatinyclaw.internal.engine;
 
 import github.javatinyclaw.context.Context;
+import github.javatinyclaw.internal.context.PromptComposer;
 import github.javatinyclaw.internal.provider.LLMProvider;
 import github.javatinyclaw.internal.schema.Message;
 import github.javatinyclaw.internal.schema.Role;
@@ -22,12 +23,14 @@ public class AgentEngine {
     // WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
     public String workDir;
     public boolean enableThinking; // 【新增】慢思考模式开关
+    private PromptComposer composer; // 【新增】引擎持有 Composer 实例
 
     public AgentEngine(LLMProvider p, Registry r, String workDir, boolean enableThinking) {
         this.provider = p;
         this.registry = r;
         this.workDir = workDir;
         this.enableThinking = enableThinking;
+        this.composer = PromptComposer.newPromptComposer(workDir); // 初始化组装器
     }
 
     // Run 启动 Agent 的生命周期
@@ -36,14 +39,13 @@ public class AgentEngine {
         logPrintf("[Engine] 引擎启动，锁定工作区: %s%n", workDir);
         logPrintf("[Engine] 慢思考模式 (Thinking Phase): %s%n", enableThinking);
 
+        // 【核心修改】动态组装 System Prompt，彻底替换掉以前硬编码的面条提示词！
+        Message systemMsg = composer.build();
+
         // 1. 初始化会话的 Context (上下文内存)
         // 在真实的场景中，这里会由动态 Prompt 组装器加载 AGENTS.md。目前我们先硬编码。
         List<Message> contextHistory = new ArrayList<Message>();
-
-        Message systemMsg = new Message();
-        systemMsg.role = Role.SYSTEM;
-        systemMsg.content = "You are java-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.";
-        contextHistory.add(systemMsg);
+        contextHistory.add(systemMsg); // 注入动态组装的内核、AGENTS.md 与 Skills
 
         Message userMsg = new Message();
         userMsg.role = Role.USER;

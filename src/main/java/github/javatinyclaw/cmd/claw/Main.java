@@ -1,12 +1,8 @@
 package github.javatinyclaw.cmd.claw;
 
-import com.lark.oapi.core.request.EventReq;
-import com.lark.oapi.core.response.EventResp;
-import com.lark.oapi.event.EventDispatcher;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
+import github.javatinyclaw.context.Context;
 import github.javatinyclaw.internal.engine.AgentEngine;
-import github.javatinyclaw.internal.feishu.FeishuBot;
+import github.javatinyclaw.internal.engine.TerminalReporter;
 import github.javatinyclaw.internal.provider.LLMProvider;
 import github.javatinyclaw.internal.provider.OpenAIProvider;
 import github.javatinyclaw.internal.tools.BashTool;
@@ -16,20 +12,8 @@ import github.javatinyclaw.internal.tools.Registry;
 import github.javatinyclaw.internal.tools.RegistryImpl;
 import github.javatinyclaw.internal.tools.WriteFileTool;
 
-import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-
 public class Main {
 
-    // ==========================================
-    // 3. 组装运行
-    // ==========================================
     public static void main(String[] args) {
         // 确保已设置 ZHIPU_API_KEY
         String apiKey = System.getenv("ZHIPU_API_KEY");
@@ -43,6 +27,8 @@ public class Main {
         if (workDir == null) {
             workDir = "";
         }
+        // 这里需要改下到单独的目录
+        workDir += "/workspace";
 
         // 1. 初始化真实的 Provider大脑 (指向智谱 GLM-4.5)
         // 这里你可以任意切换 NewZhipuClaudeProvider 或 NewZhipuOpenAIProvider，效果完全一致！
@@ -55,83 +41,24 @@ public class Main {
         registry.register(ReadFileTool.newReadFileTool(workDir));
         registry.register(WriteFileTool.newWriteFileTool(workDir));
         registry.register(BashTool.newBashTool(workDir));
-        // 【新增挂载】
         registry.register(EditFileTool.newEditFileTool(workDir));
 
         // 3.实例化引擎，开启 EnableThinking = true (开启慢思考，促使模型一次性统筹规划)
-        AgentEngine eng = new AgentEngine(llmProvider, registry, workDir, false);
+        AgentEngine eng = new AgentEngine(llmProvider, registry, workDir, true);
 
-        // 2. 初始化飞书 Bot 调度器
-        FeishuBot bot = new FeishuBot(eng);
-        EventDispatcher dispatcher = bot.getEventDispatcher();
+        // 【注入新实现的终端输出器】
+        TerminalReporter reporter = TerminalReporter.newTerminalReporter();
 
-        // 3. 注册路由并启动 HTTP 服务
-        String port = ":48080";
-        System.err.printf("🚀 java-tiny-claw 飞书服务端已启动，正在监听 %s 端口%n", port);
+        String prompt = "\n"
+                + "    我需要在当前目录下新建一个 ping.go，提供一个简单的 http ping 接口。\n"
+                + "    写完之后，帮我把代码用 git 提交一下。\n"
+                + "    ";
 
         try {
-            HttpServer server = HttpServer.create(new InetSocketAddress(48080), 0);
-            server.createContext("/webhook/event", exchange -> handleEvent(exchange, dispatcher));
-            server.start();
-            Thread.currentThread().join();
+            eng.run(Context.background(), prompt, reporter);
         } catch (Exception err) {
-            System.err.printf("服务器启动失败: %s%n", err.getMessage());
+            System.err.printf("引擎运行崩溃: %s%n", err.getMessage());
             System.exit(1);
-        }
-    }
-
-    // 对齐 oapi-sdk-go httpserverext.NewEventHandlerFunc / doProcess
-    private static void handleEvent(HttpExchange exchange, EventDispatcher dispatcher) {
-        try {
-            byte[] rawBody;
-            try {
-                rawBody = exchange.getRequestBody().readAllBytes();
-            } catch (IOException err) {
-                byte[] msg = err.getMessage() == null
-                        ? new byte[0]
-                        : err.getMessage().getBytes(StandardCharsets.UTF_8);
-                exchange.sendResponseHeaders(500, msg.length == 0 ? -1 : msg.length);
-                if (msg.length > 0) {
-                    exchange.getResponseBody().write(msg);
-                }
-                return;
-            }
-
-            EventReq eventReq = new EventReq();
-            Map<String, List<String>> headers = new HashMap<String, List<String>>();
-            exchange.getRequestHeaders().forEach((name, values) -> {
-                headers.put(name.toLowerCase(Locale.ROOT), new ArrayList<String>(values));
-            });
-            eventReq.setHeaders(headers);
-            eventReq.setBody(rawBody);
-            eventReq.setHttpPath(exchange.getRequestURI().toString());
-
-            EventResp eventResp = dispatcher.handle(eventReq);
-            writeResp(exchange, eventResp);
-        } catch (Throwable err) {
-            System.err.printf("write resp result error:%s%n", err.getMessage());
-        } finally {
-            exchange.close();
-        }
-    }
-
-    private static void writeResp(HttpExchange exchange, EventResp eventResp) throws IOException {
-        if (eventResp.getHeaders() != null) {
-            eventResp.getHeaders().forEach((name, values) -> {
-                if (values == null) {
-                    return;
-                }
-                for (String value : values) {
-                    exchange.getResponseHeaders().add(name, value);
-                }
-            });
-        }
-        byte[] body = eventResp.getBody();
-        if (body != null && body.length > 0) {
-            exchange.sendResponseHeaders(eventResp.getStatusCode(), body.length);
-            exchange.getResponseBody().write(body);
-        } else {
-            exchange.sendResponseHeaders(eventResp.getStatusCode(), -1);
         }
     }
 }
