@@ -22,16 +22,18 @@ public class AgentEngine {
     private final LLMProvider provider;
     private final Registry registry;
     public boolean enableThinking;
+    public boolean planMode; // 【新增】计划模式开关
     private final Compactor compactor; // 【新增】压缩器实例
 
     // 【注意】：我们移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走！
-    public AgentEngine(LLMProvider p, Registry r, boolean enableThinking) {
+    public AgentEngine(LLMProvider p, Registry r, boolean enableThinking, boolean planMode) {
         this.provider = p;
         this.registry = r;
         this.enableThinking = enableThinking;
+        this.planMode = planMode;
         // 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
         // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
-        this.compactor = Compactor.newCompactor(3000, 6);
+        this.compactor = Compactor.newCompactor(20000, 6);
     }
 
     // 【核心改造】: 移除 userPrompt 参数，改为接收一个具体的 Session 实例
@@ -39,7 +41,7 @@ public class AgentEngine {
         logPrintf("[Engine] 唤醒会话 [%s]，锁定工作区: %s%n", session.id, session.workDir);
 
         // 根据当前 Session 的工作区，动态组装最新的 System Prompt
-        PromptComposer composer = PromptComposer.newPromptComposer(session.workDir);
+        PromptComposer composer = PromptComposer.newPromptComposer(session.workDir, planMode);
         Message systemMsg = composer.build();
 
         while (true) {
