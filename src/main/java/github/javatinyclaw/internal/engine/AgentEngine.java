@@ -1,6 +1,7 @@
 package github.javatinyclaw.internal.engine;
 
 import github.javatinyclaw.context.Context;
+import github.javatinyclaw.internal.context.Compactor;
 import github.javatinyclaw.internal.context.PromptComposer;
 import github.javatinyclaw.internal.context.Session;
 import github.javatinyclaw.internal.provider.LLMProvider;
@@ -21,12 +22,16 @@ public class AgentEngine {
     private final LLMProvider provider;
     private final Registry registry;
     public boolean enableThinking;
+    private final Compactor compactor; // 【新增】压缩器实例
 
     // 【注意】：我们移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走！
     public AgentEngine(LLMProvider p, Registry r, boolean enableThinking) {
         this.provider = p;
         this.registry = r;
         this.enableThinking = enableThinking;
+        // 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
+        // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
+        this.compactor = Compactor.newCompactor(3000, 6);
     }
 
     // 【核心改造】: 移除 userPrompt 参数，改为接收一个具体的 Session 实例
@@ -40,15 +45,19 @@ public class AgentEngine {
         while (true) {
             List<ToolDefinition> availableTools = registry.getAvailableTools();
 
-            // 1. 【上下文组装】: System Prompt + 截取最近的 6 条消息作为 Working Memory
-            // 在实际业务中，由于工具返回结果可能很长，短期工作记忆往往设为 6-10 条足以维系连贯对话
-            List<Message> workingMemory = session.getWorkingMemory(6);
+            // 1. 从 Session 提取出近期的 Working Memory (例如最近 20 条，给压缩器留下充足的判断空间)
+            List<Message> workingMemory = session.getWorkingMemory(20);
 
-            List<Message> contextHistory = new ArrayList<Message>();
+            List<Message> contextHistory = new ArrayList<>();
             contextHistory.add(systemMsg);
             contextHistory.addAll(workingMemory);
 
-            // 2. ================= Phase 1: Thinking =================
+            // 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
+            // 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
+            List<Message> compactedContext = compactor.compact(contextHistory);
+
+            // 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文 (compactedContext)
+            // ================= Phase 1: Thinking =================
             if (enableThinking) {
                 if (reporter != null) {
                     reporter.onThinking(ctx);
@@ -56,7 +65,7 @@ public class AgentEngine {
 
                 Message thinkResp;
                 try {
-                    thinkResp = provider.generate(ctx, contextHistory, null);
+                    thinkResp = provider.generate(ctx, compactedContext, null);
                 } catch (Exception err) {
                     throw new Exception("Thinking 阶段失败: " + err.getMessage(), err);
                 }
@@ -64,21 +73,22 @@ public class AgentEngine {
                     // 将思考过程持久化到 Session 中！
                     session.append(thinkResp);
                     // 把它追加到当前这一轮的临时上下文中，供 Action 阶段使用
-                    contextHistory.add(thinkResp);
+                    compactedContext.add(thinkResp);
                 }
             }
 
             // 3. ================= Phase 2: Action =================
             Message actionResp;
             try {
-                actionResp = provider.generate(ctx, contextHistory, availableTools);
+                actionResp = provider.generate(ctx, compactedContext, availableTools);
             } catch (Exception err) {
                 throw new Exception("Action 阶段失败: " + err.getMessage(), err);
             }
 
-            // 将大模型的行动响应持久化到 Session 中
+            // 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
+            // Compact 只作用于本轮发给大模型的那个临时 Context。
             session.append(actionResp);
-            contextHistory.add(actionResp);
+            compactedContext.add(actionResp);
 
             if (actionResp.content != null && !actionResp.content.isEmpty() && reporter != null) {
                 reporter.onMessage(ctx, actionResp.content);
