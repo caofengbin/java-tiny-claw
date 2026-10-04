@@ -23,6 +23,11 @@ public class Compactor {
     // Compact 接收准备发送给大模型的消息数组。
     // 如果总长度超标，对远期历史区进行全量掩码 (Masking)，对短期保护区进行超长局部截断 (Truncation)。
     public List<Message> compact(List<Message> msgs) {
+        // 腾讯 MaaS 要求发出的 messages 里至少有一条真正的 user。
+        // 带 toolCallId 的 user 会被 Provider 发成 role:tool，不能算。
+        // 这条校验必须在水位判断之前：没超阈值时也会直接返回。
+        msgs = ensureUserMessage(msgs);
+
         int currentLength = estimateLength(msgs);
 
         // 如果没有超过水位线，直接返回原数组 (大多数情况下的正常路径)
@@ -89,6 +94,36 @@ public class Compactor {
         System.err.printf("[Compactor] ✅ 压缩完成。上下文长度从 %d 降至 %d 字符。%n", currentLength, newLength);
 
         return compacted;
+    }
+
+    // ensureUserMessage 在开头连续的 system 消息之后补一条 user。
+    // 原始用户指令若已被 Working Memory 裁掉，这里恢复不了原文。
+    private List<Message> ensureUserMessage(List<Message> msgs) {
+        if (msgs == null) {
+            msgs = new ArrayList<>();
+        }
+        for (Message msg : msgs) {
+            if (Role.USER.equals(msg.role) && (msg.toolCallId == null || msg.toolCallId.isEmpty())) {
+                return msgs;
+            }
+        }
+
+        int insertAt = 0;
+        while (insertAt < msgs.size() && Role.SYSTEM.equals(msgs.get(insertAt).role)) {
+            insertAt++;
+        }
+
+        Message userMsg = new Message();
+        userMsg.role = Role.USER;
+        userMsg.content = "请根据已有对话、PLAN.md 和 TODO.md，继续执行尚未完成的任务。";
+
+        List<Message> out = new ArrayList<>(msgs.size() + 1);
+        out.addAll(msgs.subList(0, insertAt));
+        out.add(userMsg);
+        out.addAll(msgs.subList(insertAt, msgs.size()));
+
+        System.err.printf("[Compactor] 上下文中缺少 user 消息，已在系统提示后补入一条以适配腾讯 MaaS%n");
+        return out;
     }
 
     // estimateLength 粗略计算当前上下文的总字符长度
