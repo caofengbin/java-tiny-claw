@@ -19,20 +19,6 @@ import github.javatinyclaw.internal.tools.WriteFileTool;
 public class Main {
 
     public static void main(String[] args) {
-        // 通过命令行参数接收用户的 prompt
-        String prompt = "";
-        for (int i = 0; i < args.length; i++) {
-            if ("-prompt".equals(args[i]) && i + 1 < args.length) {
-                prompt = args[i + 1];
-                break;
-            }
-        }
-
-        if (prompt.isEmpty()) {
-            System.out.println("用法: java -jar target/java-tiny-claw-1.0.0.jar -prompt \"你的任务指令\"");
-            System.exit(1);
-        }
-
         // 确保已设置 ZHIPU_API_KEY
         String apiKey = System.getenv("ZHIPU_API_KEY");
         if (apiKey == null || apiKey.isEmpty()) {
@@ -52,18 +38,33 @@ public class Main {
         registry.register(BashTool.newBashTool(workDir));
         registry.register(EditFileTool.newEditFileTool(workDir));
 
-        // 3.实例化引擎.引擎本身变成无状态的，它不绑定 WorkDir（仅适用于本讲演示）
-        AgentEngine eng = new AgentEngine(llmProvider, registry, false, true);
+        // 关闭 Plan 模式，专注于见证它改变主意的单点纠偏过程
+        AgentEngine eng = new AgentEngine(llmProvider, registry, false, false);
         // 4.【注入新实现的终端输出器】
         TerminalReporter reporter = TerminalReporter.newTerminalReporter();
 
-        // 我们使用一个固定的 SessionID，以便在多次运行之间共享基于内存的“短期工作记忆”。
-        // (在真实的 CLI 中，如果进程重启，Session 的内存历史其实是丢失的。
-        // 但这正是我们要演示的重点：即便短期内存丢失，只要 TODO.md 还在，任务就能继续！)
-        String sessionID = "task_web_server_01";
+        String sessionID = "test_recovery_001";
         Session sess = SessionManager.globalSessionMgr.getOrCreate(sessionID, workDir);
 
-        System.err.printf("%n>>> 🚀 收到指令: %s%n", prompt);
+        // 这是一个巨大的陷阱指令：
+        // 我们不给它查看文件的机会，直接命令它凭初始上下文去修改文件，目的是诱发 old_text 不匹配的错误。
+        String prompt = """
+
+                    我当前目录下有一个 auth.go 文件。
+                    请修改 auth.go 中的 login 函数。
+                    请直接使用 edit_file 工具替换下面的代码块，将判断条件改为同时允许"admin"、"root"和"guest"三种用户登录：
+
+                    // 鉴权入口函数
+                    func login(user string) bool {
+                        // 检查用户名
+                        if user == "admin" {
+                            return true
+                        }
+                        return false
+                    }
+                    \
+                """;
+        System.err.println("\n>>> 🚀 启动自愈测试任务...");
 
         // 将用户的 Prompt 压入 Session
         Message userMsg = new Message();

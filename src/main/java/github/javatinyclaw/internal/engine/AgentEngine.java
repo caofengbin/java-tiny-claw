@@ -3,6 +3,7 @@ package github.javatinyclaw.internal.engine;
 import github.javatinyclaw.context.Context;
 import github.javatinyclaw.internal.context.Compactor;
 import github.javatinyclaw.internal.context.PromptComposer;
+import github.javatinyclaw.internal.context.RecoveryManager;
 import github.javatinyclaw.internal.context.Session;
 import github.javatinyclaw.internal.provider.LLMProvider;
 import github.javatinyclaw.internal.schema.Message;
@@ -24,6 +25,7 @@ public class AgentEngine {
     public boolean enableThinking;
     public boolean planMode; // 【新增】计划模式开关
     private final Compactor compactor; // 【新增】压缩器实例
+    private final RecoveryManager recovery; // 【新增】自愈管理器
 
     // 【注意】：我们移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走！
     public AgentEngine(LLMProvider p, Registry r, boolean enableThinking, boolean planMode) {
@@ -34,6 +36,7 @@ public class AgentEngine {
         // 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
         // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
         this.compactor = Compactor.newCompactor(20000, 6);
+        this.recovery = RecoveryManager.newRecoveryManager(); // 初始化 Recovery
     }
 
     // 【核心改造】: 移除 userPrompt 参数，改为接收一个具体的 Session 实例
@@ -102,7 +105,7 @@ public class AgentEngine {
                 break;
             }
 
-            // 4. ================= 并发执行底层工具 =================
+            // 4. ================= 执行工具并记录 Observation,并注入自愈模板 =================
             Message[] observationMses = new Message[toolCallCount];
             CountDownLatch wg = new CountDownLatch(toolCallCount);
 
@@ -117,7 +120,19 @@ public class AgentEngine {
                             reporter.onToolCall(ctx, call.name, args);
                         }
 
+                        // 底层物理执行工具
                         ToolResult result = registry.execute(ctx, call);
+
+                        // 【核心拦截与注入】
+                        String finalOutput = result.output;
+                        if (result.isError) {
+                            // 发生错误，交由 RecoveryManager 诊断并注入“锦囊妙计”
+                            finalOutput = recovery.analyzeAndInject(call.name, result.output);
+                            logPrintf("  -> [Java-%d] ❌ 注入救援指南: %s%n", idx, finalOutput);
+                        } else {
+                            int outputBytes = result.output == null ? 0 : result.output.getBytes(StandardCharsets.UTF_8).length;
+                            logPrintf("  -> [Java-%d] ✅ 工具执行成功 (返回 %d 字节)%n", idx, outputBytes);
+                        }
 
                         if (reporter != null) {
                             String displayOutput = result.output;
@@ -130,9 +145,10 @@ public class AgentEngine {
                             reporter.onToolResult(ctx, call.name, displayOutput, result.isError);
                         }
 
+                        // 将注入过 Recovery Hint 的最终结果写入上下文历史
                         Message obsMsg = new Message();
                         obsMsg.role = Role.USER;
-                        obsMsg.content = result.output;
+                        obsMsg.content = finalOutput;
                         obsMsg.toolCallId = call.id;
                         observationMses[idx] = obsMsg;
                     } finally {
