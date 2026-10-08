@@ -21,6 +21,7 @@ import github.javatinyclaw.internal.schema.Message;
 import github.javatinyclaw.internal.schema.Role;
 import github.javatinyclaw.internal.schema.ToolCall;
 import github.javatinyclaw.internal.schema.ToolDefinition;
+import github.javatinyclaw.internal.schema.Usage;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -43,7 +44,7 @@ public class OpenAIProvider implements LLMProvider {
     // NewZhipuOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向智谱底座
     public static OpenAIProvider newZhipuOpenAIProvider(String model) {
         String apiKey = System.getenv("ZHIPU_API_KEY");
-        if (apiKey == null || apiKey.equals("")) {
+        if (apiKey == null || apiKey.isEmpty()) {
             throw new IllegalStateException("请设置 ZHIPU_API_KEY 环境变量");
         }
         // 核心：将官方 SDK 的地址替换为智谱的兼容端点
@@ -57,7 +58,7 @@ public class OpenAIProvider implements LLMProvider {
 
         // WHISTLE_PROXY=127.0.0.1:8899 时走本地 Whistle；未设置则直连。
         String proxy = System.getenv("WHISTLE_PROXY");
-        if (proxy != null && !proxy.equals("")) {
+        if (proxy != null && !proxy.isEmpty()) {
             String[] hostPort = proxy.split(":");
             clientBuilder.proxy(new Proxy(
                 Proxy.Type.HTTP,
@@ -79,7 +80,7 @@ public class OpenAIProvider implements LLMProvider {
                 if (Role.SYSTEM.equals(msg.role)) {
                     paramsBuilder.addSystemMessage(nullToEmpty(msg.content));
                 } else if (Role.USER.equals(msg.role)) {
-                    if (msg.toolCallId != null && !msg.toolCallId.equals("")) {
+                    if (msg.toolCallId != null && !msg.toolCallId.isEmpty()) {
                         // 注意：v3 新版参数顺序是 (content, toolCallID)
                         paramsBuilder.addMessage(ChatCompletionToolMessageParam.builder()
                             .content(nullToEmpty(msg.content))
@@ -91,7 +92,7 @@ public class OpenAIProvider implements LLMProvider {
                 } else if (Role.ASSISTANT.equals(msg.role)) {
                     ChatCompletionAssistantMessageParam.Builder astParam = ChatCompletionAssistantMessageParam.builder();
 
-                    if (msg.content != null && !msg.content.equals("")) {
+                    if (msg.content != null && !msg.content.isEmpty()) {
                         astParam.content(msg.content);
                     }
 
@@ -115,7 +116,7 @@ public class OpenAIProvider implements LLMProvider {
         }
 
         // 2. 翻译工具定义 (v3 新 API 特性适配)
-        List<ChatCompletionFunctionTool> openaiTools = new ArrayList<ChatCompletionFunctionTool>();
+        List<ChatCompletionFunctionTool> openaiTools = new ArrayList<>();
         if (availableTools != null) {
             for (ToolDefinition toolDef : availableTools) {
                 FunctionParameters params = toFunctionParameters(toolDef.inputSchema);
@@ -154,10 +155,23 @@ public class OpenAIProvider implements LLMProvider {
         }
 
         // 4. 将 API Response 反向翻译为内部 schema.Message
-        ChatCompletionMessage choice = resp.choices().get(0).message();
+        ChatCompletionMessage choice = resp.choices().getFirst().message();
         Message resultMsg = new Message();
         resultMsg.role = Role.ASSISTANT;
         resultMsg.content = choice.content().orElse("");
+
+        // 【新增】提取 Usage 信息
+        long promptTokens = 0;
+        long completionTokens = 0;
+        if (resp.usage().isPresent()) {
+            promptTokens = resp.usage().get().promptTokens();
+            completionTokens = resp.usage().get().completionTokens();
+        }
+        if (promptTokens > 0 || completionTokens > 0) {
+            resultMsg.usage = new Usage();
+            resultMsg.usage.promptTokens = (int) promptTokens;
+            resultMsg.usage.completionTokens = (int) completionTokens;
+        }
 
         List<ChatCompletionMessageToolCall> toolCalls = choice.toolCalls().orElse(new ArrayList<ChatCompletionMessageToolCall>());
         for (ChatCompletionMessageToolCall tc : toolCalls) {
@@ -168,7 +182,7 @@ public class OpenAIProvider implements LLMProvider {
                 call.name = functionCall.function().name();
                 call.arguments = functionCall.function().arguments().getBytes(StandardCharsets.UTF_8);
                 if (resultMsg.toolCalls == null) {
-                    resultMsg.toolCalls = new ArrayList<ToolCall>();
+                    resultMsg.toolCalls = new ArrayList<>();
                 }
                 resultMsg.toolCalls.add(call);
             }
@@ -187,7 +201,7 @@ public class OpenAIProvider implements LLMProvider {
             // fallback：JSON 往返序列化
             try {
                 byte[] bytes = OBJECT_MAPPER.writeValueAsBytes(inputSchema);
-                schemaMap = OBJECT_MAPPER.readValue(bytes, new TypeReference<Map<String, Object>>() {
+                schemaMap = OBJECT_MAPPER.readValue(bytes, new TypeReference<>() {
                 });
             } catch (Exception ignored) {
                 schemaMap = null;

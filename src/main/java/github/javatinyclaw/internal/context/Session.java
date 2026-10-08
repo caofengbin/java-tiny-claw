@@ -16,9 +16,26 @@ public class Session {
     public Instant createdAt;
     public Instant updatedAt;
 
+    // 【新增】用于统计该 Session 累计消耗的资源
+    public int totalPromptTokens;
+    public int totalCompletionTokens;
+    public double totalCostCNY;
+
     // 存放此 Session 中所有的用户输入、大模型回复和工具调用结果
     private final List<Message> history = new ArrayList<>();
     private final ReentrantReadWriteLock mu = new ReentrantReadWriteLock(); // 读写锁，防止并发读写历史时发生 Data Race
+
+    // RecordUsage 是一个给外部 Tracker 调用的辅助方法，用于累加账单
+    public void recordUsage(int prompt, int completion, double cost) {
+        mu.writeLock().lock();
+        try {
+            totalPromptTokens += prompt;
+            totalCompletionTokens += completion;
+            totalCostCNY += cost;
+        } finally {
+            mu.writeLock().unlock();
+        }
+    }
 
     public static Session newSession(String id, String workDir) {
         Session session = new Session();
@@ -94,6 +111,7 @@ public class Session {
         dst.content = src.content;
         dst.toolCalls = src.toolCalls;
         dst.toolCallId = src.toolCallId;
+        dst.usage = src.usage;
         return dst;
     }
 }

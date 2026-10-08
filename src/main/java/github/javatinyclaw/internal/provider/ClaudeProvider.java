@@ -18,6 +18,7 @@ import github.javatinyclaw.internal.schema.Message;
 import github.javatinyclaw.internal.schema.Role;
 import github.javatinyclaw.internal.schema.ToolCall;
 import github.javatinyclaw.internal.schema.ToolDefinition;
+import github.javatinyclaw.internal.schema.Usage;
 
 import java.net.InetSocketAddress;
 import java.net.Proxy;
@@ -193,6 +194,15 @@ public class ClaudeProvider implements LLMProvider {
         Message resultMsg = new Message();
         resultMsg.role = Role.ASSISTANT;
         resultMsg.content = "";
+
+        // 【新增】提取并封装 Token 消耗 (Claude 特有的 Usage 字段名)
+        long inputTokens = resp.usage().inputTokens();
+        long outputTokens = resp.usage().outputTokens();
+        if (inputTokens > 0 || outputTokens > 0) {
+            resultMsg.usage = new Usage();
+            resultMsg.usage.promptTokens = (int) inputTokens;
+            resultMsg.usage.completionTokens = (int) outputTokens;
+        }
 
         for (ContentBlock block : resp.content()) {
             if (block.isText()) {

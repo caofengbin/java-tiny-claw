@@ -12,4 +12,7 @@ public class Message {
 
     // 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
     public String toolCallId;
+
+    // 【新增】如果这是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
+    public Usage usage;
 }

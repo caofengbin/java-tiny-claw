@@ -148,6 +148,7 @@ public class Compactor {
         dst.content = src.content;
         dst.toolCalls = src.toolCalls;
         dst.toolCallId = src.toolCallId;
+        dst.usage = src.usage;
         return dst;
     }
 
