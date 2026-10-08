@@ -26,6 +26,7 @@ public class AgentEngine {
     public boolean planMode; // 【新增】计划模式开关
     private final Compactor compactor; // 【新增】压缩器实例
     private final RecoveryManager recovery; // 【新增】自愈管理器
+    private final ReminderInjector injector; // 【新增】提醒注入器
 
     // 【注意】：我们移除了 Engine 层级的 WorkDir，因为 WorkDir 现在应该跟随 Session 走！
     public AgentEngine(LLMProvider p, Registry r, boolean enableThinking, boolean planMode) {
@@ -37,6 +38,7 @@ public class AgentEngine {
         // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
         this.compactor = Compactor.newCompactor(20000, 6);
         this.recovery = RecoveryManager.newRecoveryManager(); // 初始化 Recovery
+        this.injector = ReminderInjector.newReminderInjector(); // 【初始化注入器】
     }
 
     // 【核心改造】: 移除 userPrompt 参数，改为接收一个具体的 Session 实例
@@ -109,6 +111,11 @@ public class AgentEngine {
             Message[] observationMses = new Message[toolCallCount];
             CountDownLatch wg = new CountDownLatch(toolCallCount);
 
+            // 用于收集本轮执行的最后一个工具，供 Reminder 探测器分析
+            // (在真实的工业级架构中，如果并发调用了多个工具，我们可以逐个分析或仅分析报错的那个。这里简化为取第一个)
+            ToolCall[] lastToolCall = new ToolCall[] { new ToolCall() };
+            ToolResult[] lastToolResult = new ToolResult[] { new ToolResult() };
+
             for (int i = 0; i < toolCallCount; i++) {
                 final int idx = i;
                 final ToolCall call = actionResp.toolCalls.get(i);
@@ -151,6 +158,12 @@ public class AgentEngine {
                         obsMsg.content = finalOutput;
                         obsMsg.toolCallId = call.id;
                         observationMses[idx] = obsMsg;
+
+                        // 捕获状态供外部探测器使用
+                        if (idx == 0) {
+                            lastToolCall[0] = call;
+                            lastToolResult[0] = result;
+                        }
                     } finally {
                         wg.countDown();
                     }
@@ -159,8 +172,16 @@ public class AgentEngine {
 
             wg.await();
 
-            // 将所有的工具执行结果（Observation）持久化到 Session 中，开启下一轮的复盘与推理
+            // 1. 先将普通的工具执行结果存入 Session
             session.append(observationMses);
+
+            // 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测！
+            Message reminderMsg = injector.checkAndInject(lastToolCall[0], lastToolResult[0]);
+            if (reminderMsg != null) {
+                // 如果触发了干预规则，将这条严厉的提醒作为 User 消息，强制追加到 Session 的最末尾！
+                // 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
+                session.append(reminderMsg);
+            }
         }
     }
 

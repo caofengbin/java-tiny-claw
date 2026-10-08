@@ -13,7 +13,7 @@ keytool -importcert -alias whistle \
 ```
 keytool -importcert -alias whistle \
   -file /Users/fengbincao/Downloads/rootCA.crt \
-  -keystore "/Users/fengbincao/Documents/App/jdk/jdk17/Contents/Home/lib/security/cacerts" \
+  -keystore "/Users/fengbincao/Documents/App/jdk/jdk21/Contents/Home/lib/security/cacerts" \
   -storepass changeit
 ```
 
