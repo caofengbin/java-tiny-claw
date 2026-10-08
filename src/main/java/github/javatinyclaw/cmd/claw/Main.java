@@ -1,20 +1,33 @@
 package github.javatinyclaw.cmd.claw;
 
-import github.javatinyclaw.context.Context;
+import com.lark.oapi.core.request.EventReq;
+import com.lark.oapi.core.response.EventResp;
+import com.lark.oapi.event.EventDispatcher;
+import com.sun.net.httpserver.HttpServer;
 import github.javatinyclaw.internal.context.Session;
 import github.javatinyclaw.internal.context.SessionManager;
 import github.javatinyclaw.internal.engine.AgentEngine;
-import github.javatinyclaw.internal.engine.TerminalReporter;
+import github.javatinyclaw.internal.feishu.ApprovalManager;
+import github.javatinyclaw.internal.feishu.ApprovalResult;
+import github.javatinyclaw.internal.feishu.FeishuBot;
 import github.javatinyclaw.internal.provider.LLMProvider;
 import github.javatinyclaw.internal.provider.OpenAIProvider;
 import github.javatinyclaw.internal.schema.Message;
 import github.javatinyclaw.internal.schema.Role;
 import github.javatinyclaw.internal.tools.BashTool;
 import github.javatinyclaw.internal.tools.EditFileTool;
+import github.javatinyclaw.internal.tools.MiddlewareResult;
 import github.javatinyclaw.internal.tools.ReadFileTool;
 import github.javatinyclaw.internal.tools.Registry;
 import github.javatinyclaw.internal.tools.RegistryImpl;
 import github.javatinyclaw.internal.tools.WriteFileTool;
+
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 public class Main {
 
@@ -40,30 +53,86 @@ public class Main {
 
         // 关闭 Plan 模式，让它在死胡同里专注地展示挣扎过程
         AgentEngine eng = new AgentEngine(llmProvider, registry, false, false);
-        // 4.【注入新实现的终端输出器】
-        TerminalReporter reporter = TerminalReporter.newTerminalReporter();
 
-        String sessionID = "test_doom_loop_001";
+        // 假设一个bot绑定一个session
+        String sessionID = "test_command_intercept_001";
         Session sess = SessionManager.globalSessionMgr.getOrCreate(sessionID, workDir);
+        Message emptyUser = new Message();
+        emptyUser.role = Role.USER;
+        emptyUser.content = "";
+        sess.append(emptyUser);
 
-        String prompt = """
+        FeishuBot bot = new FeishuBot(eng, sess);
+        EventDispatcher dispatcher = bot.getEventDispatcher();
 
-                    帮我读取当前目录下的 secret_key.txt。
-                    注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
-                    如果报错了，请你【千万不要改变参数】，即使失败也直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
-                """;
-        System.err.println("\n>>> 🚀 启动死循环干预测试...");
+        // 【核心注入】注册安全拦截 Middleware
+        registry.use((ctx, call) -> {
+            String argsStr = call.arguments == null ? "" : new String(call.arguments, StandardCharsets.UTF_8);
 
-        // 将用户的 Prompt 压入 Session
-        Message userMsg = new Message();
-        userMsg.role = Role.USER;
-        userMsg.content = prompt;
-        sess.append(userMsg);
+            // 检查是否命中高危特征库
+            if (ApprovalManager.isDangerousCommand(call.name, argsStr)) {
+                String taskID = call.id; // 使用大模型生成的唯一 ToolCallID 作为 TaskID
 
+                // 挂起当前协程，发送消息给飞书，死死等待人类的审批！
+                ApprovalResult result = ApprovalManager.globalApprovalMgr.waitForApproval(taskID, call.name, argsStr, bot.reporter());
+
+                if (!result.allowed) {
+                    return new MiddlewareResult(false, result.reason); // 拒绝，将理由传回给大模型
+                }
+                return new MiddlewareResult(true, ""); // 同意，放行底层工具
+            }
+
+            // 没命中黑名单，直接 YOLO 放行
+            return new MiddlewareResult(true, "");
+        });
+
+        // 3. 注册路由并启动 HTTP 服务
+        String port = ":48080";
         try {
-            eng.run(Context.background(), sess, reporter);
+            HttpServer server = HttpServer.create(new InetSocketAddress(48080), 0);
+            server.createContext("/webhook/event", exchange -> {
+                try {
+                    EventReq eventReq = new EventReq();
+                    Map<String, List<String>> headers = new HashMap<>();
+                    for (Map.Entry<String, List<String>> entry : exchange.getRequestHeaders().entrySet()) {
+                        headers.put(entry.getKey(), new ArrayList<>(entry.getValue()));
+                    }
+                    eventReq.setHeaders(headers);
+                    eventReq.setBody(exchange.getRequestBody().readAllBytes());
+                    eventReq.setHttpPath(exchange.getRequestURI().toString());
+
+                    EventResp eventResp = dispatcher.handle(eventReq);
+
+                    if (eventResp.getHeaders() != null) {
+                        for (Map.Entry<String, List<String>> entry : eventResp.getHeaders().entrySet()) {
+                            exchange.getResponseHeaders().put(entry.getKey(), entry.getValue());
+                        }
+                    }
+                    byte[] body = eventResp.getBody();
+                    if (body == null) {
+                        body = new byte[0];
+                    }
+                    exchange.sendResponseHeaders(eventResp.getStatusCode(), body.length);
+                    if (body.length > 0) {
+                        exchange.getResponseBody().write(body);
+                    }
+                } catch (Exception err) {
+                    byte[] errBody = err.getMessage() == null ? new byte[0] : err.getMessage().getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(500, errBody.length);
+                    if (errBody.length > 0) {
+                        exchange.getResponseBody().write(errBody);
+                    }
+                } catch (Throwable e) {
+                    throw new RuntimeException(e);
+                } finally {
+                    exchange.close();
+                }
+            });
+            server.start();
+            System.err.printf("🚀 go-tiny-claw 飞书服务端已启动，正在监听 %s 端口%n", port);
+            Thread.currentThread().join();
         } catch (Exception err) {
-            System.err.printf("引擎运行崩溃: %s%n", err);
+            System.err.printf("服务器启动失败: %s%n", err);
             System.exit(1);
         }
     }

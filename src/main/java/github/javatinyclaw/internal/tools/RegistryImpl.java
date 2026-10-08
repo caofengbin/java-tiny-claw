@@ -13,10 +13,17 @@ import java.util.Map;
 // RegistryImpl 是 Registry 接口的默认实现
 public class RegistryImpl implements Registry {
     // 使用 map 以工具的 Name 作为 Key 进行快速 O(1) 路由查找
-    private final Map<String, BaseTool> tools = new HashMap<String, BaseTool>();
+    private final Map<String, BaseTool> tools = new HashMap<>();
+    // 【新增】保存挂载的中间件链
+    private final List<MiddlewareFunc> middlewares = new ArrayList<>();
 
     public static Registry newRegistry() {
         return new RegistryImpl();
+    }
+
+    @Override
+    public void use(MiddlewareFunc mw) {
+        middlewares.add(mw);
     }
 
     @Override
@@ -51,12 +58,25 @@ public class RegistryImpl implements Registry {
             return result;
         }
 
-        // 2. 执行工具逻辑：将原始的 JSON 字节流直接丢给具体工具
+        // 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
+        for (MiddlewareFunc mw : middlewares) {
+            MiddlewareResult decision = mw.apply(ctx, call);
+            if (!decision.allowed) {
+                System.err.printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s%n", call.name, decision.rejectReason);
+                ToolResult result = new ToolResult();
+                result.toolCallId = call.id;
+                result.output = String.format("执行被系统拦截。原因: %s", decision.rejectReason);
+                result.isError = true; // 必须返回 Error，强制大模型阅读拒绝理由
+                return result;
+            }
+        }
+
+        // 3. 执行工具逻辑 (如果所有 Middleware 都放行了)
         String output;
         try {
             output = tool.execute(ctx, call.arguments);
         } catch (Exception err) {
-            // 3. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
+            // 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
             String errMsg = String.format("Error executing %s: %s", call.name, err.getMessage());
             ToolResult result = new ToolResult();
             result.toolCallId = call.id;
