@@ -11,15 +11,17 @@ import github.javatinyclaw.internal.schema.Role;
 import github.javatinyclaw.internal.schema.ToolCall;
 import github.javatinyclaw.internal.schema.ToolDefinition;
 import github.javatinyclaw.internal.schema.ToolResult;
+import github.javatinyclaw.internal.tools.AgentRunner;
 import github.javatinyclaw.internal.tools.Registry;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 
 // AgentEngine 是微型 OS 的核心驱动
-public class AgentEngine {
+public class AgentEngine implements AgentRunner {
     private final LLMProvider provider;
     private final Registry registry;
     public boolean enableThinking;
@@ -182,6 +184,115 @@ public class AgentEngine {
                 // 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
                 session.append(reminderMsg);
             }
+        }
+    }
+
+    // RunSub 是专为 Subagent 拉起的一次性受限循环。
+    // 它不依赖外部 Session，打完就跑。
+    // Reporter：为了让用户在终端看到子智能体的工作轨迹，我们将主线程的 Reporter 透传进来，并打上特殊标记。
+    @Override
+    public String runSub(Context ctx, String taskPrompt, Registry readOnlyRegistry, Object reporter) throws Exception {
+        // 【核心优化】：子智能体极其容易偷懒。我们必须在 System Prompt 中严厉警告它必须使用工具！
+        List<Message> contextHistory = new ArrayList<>();
+
+        Message systemMsg = new Message();
+        systemMsg.role = Role.SYSTEM;
+        systemMsg.content = """
+你是一个专门负责深度探索的探路者 (Explorer Subagent)。
+你的任务是根据主架构师的指令，在当前工作区内仔细阅读代码、查阅日志，搜集足够的信息。
+
+【核心纪律】
+1. 你必须、且只能依靠内置工具（如 bash 的 find/grep，或 read_file）去寻找答案。绝对不允许凭空捏造或猜测！
+2. 如果你没有找到确切的答案，你必须继续使用工具深入搜索。
+3. 当且仅当你找到了确切的线索后，停止调用工具，直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报来做下一步决策。""";
+        contextHistory.add(systemMsg);
+
+        Message userMsg = new Message();
+        userMsg.role = Role.USER;
+        userMsg.content = taskPrompt;
+        contextHistory.add(userMsg);
+
+        // 限制子智能体最多只能跑 10 个 Turn，防止它自己卡死
+        final int maxSubTurns = 10;
+        int turnCount = 0;
+
+        while (true) {
+            turnCount++;
+            if (turnCount > maxSubTurns) {
+                throw new Exception(String.format("子智能体探索过于深入，超过 %d 轮被强制召回，请主 Agent 给它更明确的指令", maxSubTurns));
+            }
+
+            // 【驾驭底线】：子智能体仅能获取传入的只读工具注册表
+            List<ToolDefinition> availableTools = readOnlyRegistry.getAvailableTools();
+
+            List<Message> compactedContext = compactor.compact(contextHistory);
+
+            // 子任务要求急速响应，强制关闭主体的慢思考，直接预测行动
+            Message actionResp;
+            try {
+                actionResp = provider.generate(ctx, compactedContext, availableTools);
+            } catch (Exception err) {
+                throw new Exception("子智能体推理失败: " + err.getMessage(), err);
+            }
+
+            contextHistory.add(actionResp);
+
+            // 【核心退出条件】：子智能体一旦不调用工具了，说明它做好了总结汇报
+            int toolCallCount = actionResp.toolCalls == null ? 0 : actionResp.toolCalls.size();
+            if (toolCallCount == 0) {
+                // 直接将它的这段汇报内容剥离出来返回给上层
+                return actionResp.content;
+            }
+
+            // 执行只读工具的并发循环
+            Message[] observationMsgs = new Message[toolCallCount];
+            CountDownLatch wg = new CountDownLatch(toolCallCount);
+
+            for (int i = 0; i < toolCallCount; i++) {
+                final int idx = i;
+                final ToolCall call = actionResp.toolCalls.get(i);
+
+                Thread.startVirtualThread(() -> {
+                    try {
+                        // 【可视化的关键】：让终端用户看到 Subagent 正在干嘛
+                        Reporter r = null;
+                        if (reporter != null) {
+                            r = (Reporter) reporter;
+                            String args = call.arguments == null ? "" : new String(call.arguments, StandardCharsets.UTF_8);
+                            r.onToolCall(ctx, String.format("[Subagent] %s", call.name), args);
+                        }
+
+                        ToolResult result = readOnlyRegistry.execute(ctx, call);
+
+                        String finalOutput = result.output;
+                        if (result.isError) {
+                            finalOutput = recovery.analyzeAndInject(call.name, result.output);
+                        }
+
+                        if (reporter != null) {
+                            String display = finalOutput;
+                            if (display != null) {
+                                byte[] displayBytes = display.getBytes(StandardCharsets.UTF_8);
+                                if (displayBytes.length > 200) {
+                                    display = new String(displayBytes, 0, 200, StandardCharsets.UTF_8) + "... (已截断)";
+                                }
+                            }
+                            r.onToolResult(ctx, String.format("[Subagent] %s", call.name), display, result.isError);
+                        }
+
+                        Message obsMsg = new Message();
+                        obsMsg.role = Role.USER;
+                        obsMsg.content = finalOutput;
+                        obsMsg.toolCallId = call.id;
+                        observationMsgs[idx] = obsMsg;
+                    } finally {
+                        wg.countDown();
+                    }
+                });
+            }
+
+            wg.await();
+            Collections.addAll(contextHistory, observationMsgs);
         }
     }
 
