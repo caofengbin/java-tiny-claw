@@ -53,3 +53,4 @@ bin/
 # macOS
 .DS_Store
 /workspace/.claw/traces/
+/workspace/test_*
