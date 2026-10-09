@@ -1,10 +1,12 @@
 package github.javatinyclaw.internal.tools;
 
 import github.javatinyclaw.context.Context;
+import github.javatinyclaw.internal.observability.Span;
 import github.javatinyclaw.internal.schema.ToolCall;
 import github.javatinyclaw.internal.schema.ToolDefinition;
 import github.javatinyclaw.internal.schema.ToolResult;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -47,48 +49,75 @@ public class RegistryImpl implements Registry {
 
     @Override
     public ToolResult execute(Context ctx, ToolCall call) {
-        // 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
-        BaseTool tool = tools.get(call.name);
-        if (tool == null) {
-            String errMsg = String.format("Error: 系统中不存在名为 '%s' 的工具。", call.name);
-            ToolResult result = new ToolResult();
-            result.toolCallId = call.id;
-            result.output = errMsg;
-            result.isError = true; // 标记为错误，模型看到后会尝试纠正
-            return result;
-        }
+        // 【埋点 5】：开启工具执行的 Span
+        Span.Start started = Span.startSpan(ctx, "Tool.Execute");
+        ctx = started.ctx;
+        Span span = started.span;
+        span.addAttribute("tool_name", call.name);
+        // 将 JSON 参数存入以备调试
+        String arguments = call.arguments == null ? "" : new String(call.arguments, StandardCharsets.UTF_8);
+        span.addAttribute("arguments", arguments);
 
-        // 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
-        for (MiddlewareFunc mw : middlewares) {
-            MiddlewareResult decision = mw.apply(ctx, call);
-            if (!decision.allowed) {
-                System.err.printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s%n", call.name, decision.rejectReason);
+        try {
+            // 1. 路由查找：如果在注册表中找不到该工具，这是模型产生了幻觉，直接向模型抛出错误
+            BaseTool tool = tools.get(call.name);
+            if (tool == null) {
+                String errMsg = String.format("Error: 系统中不存在名为 '%s' 的工具。", call.name);
                 ToolResult result = new ToolResult();
                 result.toolCallId = call.id;
-                result.output = String.format("执行被系统拦截。原因: %s", decision.rejectReason);
-                result.isError = true; // 必须返回 Error，强制大模型阅读拒绝理由
+                result.output = errMsg;
+                result.isError = true; // 标记为错误，模型看到后会尝试纠正
                 return result;
             }
-        }
 
-        // 3. 执行工具逻辑 (如果所有 Middleware 都放行了)
-        String output;
-        try {
-            output = tool.execute(ctx, call.arguments);
-        } catch (Exception err) {
-            // 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
-            String errMsg = String.format("Error executing %s: %s", call.name, err.getMessage());
+            // 2. 【核心防御】在执行底层逻辑前，依次运行所有的 Middleware
+            for (MiddlewareFunc mw : middlewares) {
+                MiddlewareResult decision = mw.apply(ctx, call);
+                if (!decision.allowed) {
+                    span.addAttribute("intercepted", true);
+                    span.addAttribute("reject_reason", decision.rejectReason);
+                    System.err.printf("[Registry] ⚠️ 工具 %s 被 Middleware 拦截: %s%n", call.name, decision.rejectReason);
+                    ToolResult result = new ToolResult();
+                    result.toolCallId = call.id;
+                    result.output = String.format("执行被系统拦截。原因: %s", decision.rejectReason);
+                    result.isError = true; // 必须返回 Error，强制大模型阅读拒绝理由
+                    return result;
+                }
+            }
+
+            // 3. 执行工具逻辑 (如果所有 Middleware 都放行了)
+            String output;
+            try {
+                output = tool.execute(ctx, call.arguments);
+            } catch (Exception err) {
+                // 4. 封装结果：将执行结果或底层物理错误封装后返回给 Main Loop
+                span.addAttribute("error", err.getMessage());
+                String errMsg = String.format("Error executing %s: %s", call.name, err.getMessage());
+                ToolResult result = new ToolResult();
+                result.toolCallId = call.id;
+                result.output = errMsg;
+                result.isError = true;
+                return result;
+            }
+
+            // 我们甚至可以只截取输出的前 100 字符放入 Trace，防止 Trace 文件过度膨胀
+            span.addAttribute("output_preview", truncate(output, 100));
+
             ToolResult result = new ToolResult();
             result.toolCallId = call.id;
-            result.output = errMsg;
-            result.isError = true;
+            result.output = output;
+            result.isError = false;
             return result;
+        } finally {
+            span.endSpan(); // 无论成功失败，确保结束
         }
+    }
 
-        ToolResult result = new ToolResult();
-        result.toolCallId = call.id;
-        result.output = output;
-        result.isError = false;
-        return result;
+    private static String truncate(String s, int max) {
+        byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
+        if (bytes.length > max) {
+            return new String(bytes, 0, max, StandardCharsets.UTF_8) + "...";
+        }
+        return s;
     }
 }
